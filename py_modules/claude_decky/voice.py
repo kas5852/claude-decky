@@ -1,5 +1,6 @@
 import array
 import asyncio
+import contextlib
 import hashlib
 import json
 import math
@@ -172,6 +173,7 @@ class Voice:
             "download": self.download,
             "started": self.started if self.phase == "recording" else 0,
             "origin": self.origin,
+            "tap": self.tap,
             "sizes": {name: MODELS[name][2] for name in MODELS},
         }
 
@@ -327,7 +329,7 @@ class Voice:
         return {"ok": True}
 
     async def transcribe(self, pcm, seconds):
-        wav = runtime_path("voice", "last.wav")
+        wav = runtime_path("voice", "clip.wav")
         with open(wav, "wb") as handle:
             handle.write(wav_bytes(pcm))
         name = self.settings["voice_model"]
@@ -336,7 +338,11 @@ class Voice:
             whisper_binary(), "-m", model_file(name), "-t", threads, "-ac", str(audio_context(seconds)),
             "-nt", "-np", "-l", "en" if name.endswith(".en") else "auto", wav,
         ]
-        code, out, err = await run(lowered(args, self.settings["low_priority"]), timeout=120)
+        try:
+            code, out, err = await run(lowered(args, self.settings["low_priority"]), timeout=120)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(wav)
         if code != 0:
             lines = err.decode(errors="replace").strip().splitlines()
             raise RuntimeError(lines[-1] if lines else f"exit {code}")

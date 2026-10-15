@@ -78,6 +78,7 @@ def roles():
 
 async def idle():
     await until(lambda: app.chat.status != "working", timeout=120)
+    await asyncio.sleep(0.1)
 
 
 @test("fake")
@@ -306,6 +307,8 @@ async def live_transcription():
     assert result["ok"] and "stuttering" in result["text"].lower(), result
     assert heard == [(result["text"], "pad")]
     assert app.voice.phase == "idle"
+    voice_dir = os.path.join(os.environ["HARNESS_RUNTIME"], "voice")
+    assert not any(name.endswith(".wav") for name in os.listdir(voice_dir)), os.listdir(voice_dir)
     app.voice.on_text = app.heard
 
 
@@ -393,6 +396,35 @@ async def live_shortcut_wakes_only_on_chord():
         pad.stop()
         if helper.poll() is None:
             helper.kill()
+
+
+
+@test("fake")
+async def chord_spans_every_controller():
+    from claude_decky.pad import BTN_THUMBL, BTN_THUMBR, EV_KEY, EVENT
+    calls = []
+    pad = Pad(lambda: calls.append("down"), lambda held: calls.append("up"))
+    pad.codes = (BTN_THUMBL, BTN_THUMBR)
+    pipes = [os.pipe() for _ in range(2)]
+    for read_end, write_end in pipes:
+        os.set_blocking(read_end, False)
+        pad.pressed[read_end] = set()
+
+    def send(index, value):
+        read_end, write_end = pipes[index]
+        os.write(write_end, b"".join(EVENT.pack(0, 0, EV_KEY, code, value) for code in pad.codes))
+        pad.read(read_end)
+
+    send(0, 1)
+    send(1, 1)
+    assert calls == ["down"], calls
+    send(0, 0)
+    assert calls == ["down"], calls
+    send(1, 0)
+    assert calls == ["down", "up"], calls
+    for read_end, write_end in pipes:
+        os.close(read_end)
+        os.close(write_end)
 
 
 async def run_all():

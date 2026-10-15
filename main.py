@@ -128,6 +128,13 @@ class Plugin:
     async def voice_stop(self) -> dict:
         return await app.voice.stop()
 
+    async def voice_tap(self) -> dict:
+        if app.voice.phase != "recording":
+            return {"ok": False, "error": "Not listening"}
+        app.voice.tap = True
+        app.voice.changed()
+        return {"ok": True}
+
     async def voice_cancel(self) -> dict:
         return await app.voice.cancel()
 

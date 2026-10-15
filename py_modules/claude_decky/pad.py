@@ -192,7 +192,10 @@ class Pad:
                 pressed.add(code)
             else:
                 pressed.discard(code)
-        self.update(all(code in pressed for code in self.codes))
+        self.update(self.chord_held())
+
+    def chord_held(self):
+        return any(all(code in pressed for code in self.codes) for pressed in self.pressed.values())
 
     def update(self, chord):
         if chord and not self.active:
@@ -214,7 +217,7 @@ class Pad:
             pass
         self.devices.pop(fd, None)
         self.pressed.pop(fd, None)
-        if self.active and not any(all(code in pressed for code in self.codes) for pressed in self.pressed.values()):
+        if self.active and not self.chord_held():
             self.update(False)
         self.schedule_rescan()
 
