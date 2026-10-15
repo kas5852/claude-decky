@@ -1,0 +1,11 @@
+{
+  "name": "Claude",
+  "author": "Karim",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["claude", "assistant"],
+    "description": "Ask Claude Code about this device from the Quick Access menu.",
+    "image": ""
+  }
+}
