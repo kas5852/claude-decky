@@ -6,6 +6,7 @@ from claude_decky.auth import Auth
 from claude_decky.chat import Chat
 from claude_decky.env import Events
 from claude_decky.pad import Pad
+from claude_decky.providers import PROVIDERS
 from claude_decky import screen
 from claude_decky.settings import Settings
 from claude_decky.voice import Voice
@@ -15,8 +16,8 @@ class App:
     def __init__(self):
         self.events = Events()
         self.settings = Settings()
-        self.chat = Chat(self.events, self.settings)
-        self.auth = Auth(self.events)
+        self.chat = Chat(self.events, self.settings, PROVIDERS)
+        self.auth = Auth(self.events, self.settings, PROVIDERS)
         self.voice = Voice(self.events, self.settings)
         self.pad = Pad(self.pad_down, self.pad_up)
         self.pad_shot = None
@@ -48,7 +49,7 @@ class App:
             asyncio.get_running_loop().create_task(self.voice.stop())
             return
         if self.voice.phase in ("transcribing", "stopping") or self.chat.status == "working":
-            self.notify("busy", "Claude is busy", "Wait for the current answer or press Stop")
+            self.notify("busy", f"{self.chat.provider.short} is busy", "Wait for the current answer or press Stop")
             self.pad_stopping = True
             return
         self.pad_stopping = False
@@ -75,10 +76,11 @@ class App:
                 decky.logger.warning("shortcut screenshot failed: %s", error)
             self.pad_shot = None
         result = await self.chat.send(text, via="voice", shot=shot)
+        short = self.chat.provider.short
         if result.get("ok"):
-            self.notify("heard", "Asked Claude", text)
+            self.notify("heard", f"Asked {short}", text)
         else:
-            self.notify("error", "Couldn't ask Claude", result.get("error", ""))
+            self.notify("error", f"Couldn't ask {short}", result.get("error", ""))
 
     def state(self):
         return {
@@ -86,6 +88,7 @@ class App:
             "voice": self.voice.state(),
             "auth": self.auth.state(),
             "settings": dict(self.settings.values),
+            "providers": [provider.describe() for provider in PROVIDERS.values()],
             "padDevices": self.pad.describe(),
         }
 
@@ -150,13 +153,17 @@ class Plugin:
         changed = app.settings.update(patch)
         if "shortcut" in changed or "voice_model" in changed:
             app.configure_pad()
+        if "provider" in changed:
+            if app.chat.messages:
+                app.chat.add("note", f"Now using {app.chat.provider.label}. It doesn't see the messages above.")
+            await app.auth.switched()
         return app.state()
 
     async def auth_refresh(self) -> dict:
         return await app.auth.refresh()
 
-    async def auth_login(self, console: bool) -> dict:
-        return await app.auth.login(console=bool(console))
+    async def auth_login(self, flow: str) -> dict:
+        return await app.auth.login(str(flow or ""))
 
     async def auth_submit(self, code: str) -> dict:
         return app.auth.submit_code(code)
@@ -167,12 +174,12 @@ class Plugin:
     async def auth_logout(self) -> dict:
         return await app.auth.logout()
 
-    async def install_claude(self) -> dict:
+    async def install_agent(self) -> dict:
         return await app.auth.install()
 
     async def _main(self):
         app.start()
-        decky.logger.info("Claude plugin ready, %d saved messages", len(app.chat.messages))
+        decky.logger.info("Claude plugin ready, %d saved messages, using %s", len(app.chat.messages), app.settings["provider"])
 
     async def _unload(self):
         app.pad.stop()

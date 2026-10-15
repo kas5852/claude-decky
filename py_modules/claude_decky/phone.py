@@ -23,16 +23,30 @@ border:1px solid #3a3f49;background:#14161a;color:#e9e6df;font:15px ui-monospace
 .note{{color:#a29d93;font-size:.9rem}}
 .ok{{color:#8fd19e}}.bad{{color:#ff8a80}}
 </style></head><body><main>
-<h1>Sign in to Claude on your handheld</h1>
+<h1>Sign in to {title} on your handheld</h1>
 {body}
 </main></body></html>"""
 
-FORM = """<div class="step"><span class="n">1</span>Sign in with your Claude account. When it shows a code, tap <b>Copy Code</b>.
-<a class="btn" href="{go}" target="_blank" rel="noreferrer">Open Claude sign-in</a></div>
-<div class="step"><span class="n">2</span>Paste the code here and send it to the handheld.
+FORM = """<div class="step"><span class="n">1</span>{first}
+<a class="btn" href="{go}" target="_blank" rel="noreferrer">{link}</a></div>
+<div class="step"><span class="n">2</span>{second}
 <form method="post" action="{post}"><textarea name="code" autocomplete="off" autocapitalize="off" spellcheck="false"
-placeholder="Paste code"></textarea><button type="submit">Send to handheld</button></form></div>
+placeholder="{placeholder}"></textarea><button type="submit">Send to handheld</button></form></div>
 <p class="note">{note}</p>"""
+WORDING = {
+    "code": {
+        "first": "Sign in with your account. When it shows a code, copy it.",
+        "link": "Open {title} sign-in",
+        "second": "Paste the code here and send it to the handheld.",
+        "placeholder": "Paste code",
+    },
+    "key": {
+        "first": "Create an API key, then copy it.",
+        "link": "Open the API key page",
+        "second": "Paste the key here and send it to the handheld. It is only stored on the handheld.",
+        "placeholder": "Paste API key",
+    },
+}
 
 
 def lan_address():
@@ -54,9 +68,13 @@ class PhonePage:
         self.target = ""
         self.token = ""
         self.on_ready = None
+        self.kind = "code"
+        self.title = "Claude"
 
-    def start(self, target):
+    def start(self, target, kind="code", title="Claude"):
         self.target = target
+        self.kind = kind if kind in WORDING else "code"
+        self.title = title
         asyncio.get_running_loop().create_task(self.open())
 
     async def open(self):
@@ -122,10 +140,12 @@ class PhonePage:
 
     def form(self):
         base = f"/{self.token}"
-        return FORM.format(go=base + "/go", post=base, note="This page only works while the handheld shows the sign-in screen.")
+        title = html.escape(self.title)
+        wording = {key: value.format(title=title) for key, value in WORDING[self.kind].items()}
+        return FORM.format(go=base + "/go", post=base, note="This page only works while the handheld shows the sign-in screen.", **wording)
 
     def reply(self, writer, status, body, headers=None):
-        text = PAGE.format(body=body).encode() if body else b""
+        text = PAGE.format(body=body, title=html.escape(self.title)).encode() if body else b""
         reason = {200: "OK", 302: "Found", 404: "Not Found"}[status]
         head = [f"HTTP/1.1 {status} {reason}", "Content-Type: text/html; charset=utf-8",
                 f"Content-Length: {len(text)}", "Cache-Control: no-store", "Referrer-Policy: no-referrer",

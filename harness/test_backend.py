@@ -20,7 +20,9 @@ if MODE == "fake":
     HOME = os.path.join(WORK, "home")
     os.makedirs(os.path.join(HOME, ".local", "bin"))
     os.makedirs(os.path.join(HOME, ".claude"))
-    os.symlink(os.path.join(HERE, "fake_claude.py"), os.path.join(HOME, ".local", "bin", "claude"))
+    os.makedirs(os.path.join(HOME, ".gemini"))
+    for agent in ("claude", "codex", "gemini"):
+        os.symlink(os.path.join(HERE, f"fake_{agent}.py"), os.path.join(HOME, ".local", "bin", agent))
 else:
     HOME = os.path.expanduser("~")
 os.environ.update({
@@ -40,6 +42,7 @@ sys.path[:0] = [HERE, ROOT, os.path.join(ROOT, "py_modules")]
 import decky
 import main
 from claude_decky.pad import Pad
+from claude_decky.providers.base import SYSTEM_PROMPT
 from claude_decky.screen import Shot
 
 app = main.app
@@ -103,7 +106,7 @@ async def chat_streams_and_resumes():
     assert args[args.index("--resume") + 1] == "sess-1", args
     assert app.chat.command()[0].endswith("nice"), app.chat.command()
     saved = json.load(open(os.path.join(os.environ["HARNESS_SETTINGS"], "chat.json")))
-    assert saved["session_id"] == "sess-1" and len(saved["messages"]) == 4
+    assert saved["sessions"] == {"claude": "sess-1"} and len(saved["messages"]) == 4
 
 
 @test("fake")
@@ -174,7 +177,7 @@ async def new_chat_clears_everything():
     state = await plugin.new_chat()
     assert state["messages"] == [] and state["resumable"] is False
     saved = json.load(open(os.path.join(os.environ["HARNESS_SETTINGS"], "chat.json")))
-    assert saved == {"session_id": None, "messages": []}
+    assert saved == {"sessions": {}, "messages": []}
 
 
 @test("fake")
@@ -201,9 +204,9 @@ def fetch(url, method="GET", body=None):
 async def sign_in_with_code_typed_on_device():
     status = app.auth.quick_status()
     assert status["installed"] and not status["loggedIn"], status
-    await plugin.auth_login(False)
+    await plugin.auth_login("claudeai")
     await until(lambda: app.auth.phase == "waiting")
-    assert app.auth.url == "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=abc", app.auth.url
+    assert app.auth.state()["url"] == "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=abc", app.auth.state()["url"]
     result = await plugin.auth_submit("  wrong code ")
     assert result == {"ok": True}
     await until(lambda: app.auth.phase == "failed")
@@ -213,13 +216,13 @@ async def sign_in_with_code_typed_on_device():
 
 @test("fake")
 async def sign_in_through_phone_page():
-    await plugin.auth_login(False)
+    await plugin.auth_login("claudeai")
     await until(lambda: app.auth.state()["phoneUrl"] != "")
     url = app.auth.state()["phoneUrl"]
     code, _, page = await asyncio.to_thread(fetch, url)
     assert code == 200 and "Send to handheld" in page
     code, headers, _ = await asyncio.to_thread(fetch, url + "/go")
-    assert code == 302 and headers["Location"] == app.auth.url, headers
+    assert code == 302 and headers["Location"] == app.auth.state()["url"], headers
     code, _, _ = await asyncio.to_thread(fetch, url.rsplit("/", 1)[0] + "/wrongtoken")
     assert code == 404
     code, _, page = await asyncio.to_thread(fetch, url, "POST", "code=good%23state")
@@ -238,7 +241,7 @@ async def sign_in_through_phone_page():
 
 @test("fake")
 async def cancel_sign_in_stops_everything():
-    await plugin.auth_login(False)
+    await plugin.auth_login("claudeai")
     await until(lambda: app.auth.phase == "waiting" and app.auth.state()["phoneUrl"])
     process = app.auth.process
     await plugin.auth_cancel()
@@ -259,6 +262,284 @@ async def logout_removes_stored_tokens():
     assert json.load(open(settings_file)) == {"permissions": {"defaultMode": "x"}, "env": {"OTHER": "1"}}
     assert json.load(open(settings_file + ".claude-decky-backup")) == original
     assert oct(os.stat(settings_file).st_mode & 0o777) == "0o600"
+
+
+async def use(provider):
+    await plugin.new_chat()
+    state = await plugin.update_settings({"provider": provider, "allow_tools": False})
+    assert state["settings"]["provider"] == provider, state["settings"]
+
+
+def agent_calls(agent):
+    return [call for call in calls() if call.get("agent") == agent]
+
+
+def fake_shot(name, data):
+    image = os.path.join(WORK, name)
+    with open(image, "wb") as handle:
+        handle.write(data)
+    return Shot(image, "image/jpeg", "data:image/jpeg;base64,AAAA")
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+@test("fake")
+async def codex_answers_and_resumes():
+    await use("codex")
+    await plugin.send("hi")
+    await idle()
+    assert app.chat.status == "idle", app.chat.error
+    assert roles() == [("user", "hi"), ("assistant", "Codex says hi")], roles()
+    assert [message.get("agent") for message in app.chat.messages] == ["codex", "codex"]
+    first = agent_calls("codex")[-1]
+    args = first["args"]
+    assert args[:2] == ["exec", "--json"] and "--skip-git-repo-check" in args, args
+    assert args[args.index("-s") + 1] == "read-only" and "resume" not in args, args
+    assert os.path.realpath(args[args.index("-C") + 1]) == os.path.realpath(first["cwd"]), args
+    assert "developer_instructions=" + json.dumps(SYSTEM_PROMPT) in args, args
+    assert first["stdin"] == "hi\n" and first["env_rust_log"] == "off", first
+    await plugin.send("again")
+    await idle()
+    args = agent_calls("codex")[-1]["args"]
+    assert args[args.index("resume") + 1] == "thr-1", args
+    assert args.index("-s") < args.index("resume") and args.index("-C") < args.index("resume"), args
+    saved = json.load(open(os.path.join(os.environ["HARNESS_SETTINGS"], "chat.json")))
+    assert saved["sessions"] == {"codex": "thr-1"}, saved
+
+
+@test("fake")
+async def codex_tools_screenshot_and_full_access():
+    await use("codex")
+    await plugin.update_settings({"allow_tools": True})
+    app.chat.attach(fake_shot("codex-shot.jpg", b"\xff\xd8codex\xff\xd9"))
+    await plugin.send("use a tool on this")
+    await idle()
+    call = agent_calls("codex")[-1]
+    assert "--dangerously-bypass-approvals-and-sandbox" in call["args"] and "-s" not in call["args"], call["args"]
+    assert call["image_bytes"] == len(b"\xff\xd8codex\xff\xd9"), call
+    assert roles()[1:] == [
+        ("tool", "Run: bash -lc 'cat /sys/class/power_supply/BAT0/capacity'"),
+        ("assistant", "Codex says hi"),
+    ], roles()
+    await plugin.update_settings({"allow_tools": False})
+
+
+@test("fake")
+async def codex_auth_failure_skips_reconnect_noise():
+    await use("codex")
+    await plugin.send("fail now")
+    await idle()
+    state = app.chat.state()
+    assert state["status"] == "error" and state["authNeeded"] is True, state
+    assert roles() == [
+        ("user", "fail now"),
+        ("error", "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header"),
+    ], roles()
+
+
+@test("fake")
+async def codex_recovers_after_reconnect():
+    await use("codex")
+    await plugin.send("flaky network")
+    await idle()
+    assert app.chat.status == "idle" and app.chat.error == "", app.chat.error
+    assert roles() == [("user", "flaky network"), ("assistant", "Codex says hi")], roles()
+
+
+@test("fake")
+async def codex_lost_session_starts_fresh():
+    await use("codex")
+    app.chat.sessions["codex"] = "gone"
+    await plugin.send("hi")
+    await idle()
+    assert app.chat.status == "error" and "codex" not in app.chat.sessions, (app.chat.error, app.chat.sessions)
+    await plugin.send("hi again")
+    await idle()
+    assert app.chat.status == "idle" and "resume" not in agent_calls("codex")[-1]["args"]
+    assert app.chat.sessions["codex"] == "thr-1"
+
+
+@test("fake")
+async def codex_device_code_sign_in():
+    await use("codex")
+    await plugin.auth_logout()
+    assert not app.auth.state()["status"]["loggedIn"]
+    await plugin.auth_login("device")
+    await until(lambda: app.auth.phase == "waiting")
+    state = app.auth.state()
+    assert (state["url"], state["userCode"], state["wantsCode"], state["phoneUrl"]) == (
+        "https://auth.openai.com/codex/device", "XFP3-ZY5C0", False, ""), state
+    assert (await plugin.auth_submit("XFP3-ZY5C0"))["ok"] is False
+    open(os.path.join(HOME, ".codex_device_approved"), "w").close()
+    await until(lambda: app.auth.phase == "done")
+    status = app.auth.state()["status"]
+    assert status["loggedIn"] and status["method"] == "chatgpt", status
+
+
+@test("fake")
+async def codex_api_key_through_phone_page():
+    await use("codex")
+    await plugin.auth_logout()
+    await plugin.auth_login("api_key")
+    await until(lambda: app.auth.state()["phoneUrl"] != "")
+    url = app.auth.state()["phoneUrl"]
+    code, _, page = await asyncio.to_thread(fetch, url)
+    assert code == 200 and "Sign in to Codex" in page and "Paste API key" in page, page
+    code, headers, _ = await asyncio.to_thread(fetch, url + "/go")
+    assert code == 302 and headers["Location"] == "https://platform.openai.com/api-keys", headers
+    code, _, page = await asyncio.to_thread(fetch, url, "POST", "code=sk-test-123")
+    assert code == 200 and "Sent." in page, page
+    await until(lambda: app.auth.phase == "done")
+    status = app.auth.state()["status"]
+    assert status["loggedIn"] and status["method"] == "api_key", status
+    assert agent_calls("codex")[-1] == {"agent": "codex", "args": ["login", "--with-api-key"], "stdin": "sk-test-123"}
+
+
+def gemini_file(name):
+    return os.path.join(HOME, ".gemini", name)
+
+
+@test("fake")
+async def gemini_needs_sign_in_first():
+    await use("gemini")
+    assert not app.auth.state()["status"]["loggedIn"]
+    await plugin.send("hi")
+    await idle()
+    assert app.chat.state()["authNeeded"] is True, app.chat.state()
+
+
+@test("fake")
+async def gemini_google_sign_in_retries_bad_code():
+    await use("gemini")
+    await plugin.auth_login("google")
+    await until(lambda: app.auth.phase == "waiting")
+    assert app.auth.state()["url"].endswith("state=s1&response_type=code"), app.auth.state()
+    settings = json.load(open(gemini_file("settings.json")))
+    assert settings["security"]["auth"]["selectedType"] == "oauth-personal", settings
+    assert (await plugin.auth_submit("bad-code"))["ok"] is True
+    await until(lambda: app.auth.phase == "waiting" and app.auth.state()["url"].endswith("state=s2&response_type=code"))
+    assert "invalid_grant" in app.auth.state()["error"], app.auth.state()
+    process = app.auth.process
+    phone = app.auth.state()["phoneUrl"]
+    code, _, page = await asyncio.to_thread(fetch, phone, "POST", "code=good-code")
+    assert code == 200 and "Sent." in page, page
+    await until(lambda: app.auth.phase == "done")
+    state = app.auth.state()
+    assert state["status"]["loggedIn"] and state["status"]["method"] == "google", state
+    assert state["error"] == "", state
+    await until(lambda: app.auth.state()["status"].get("email") == "g@example.com")
+    await asyncio.sleep(0.2)
+    assert app.auth.process is None and not pid_alive(process.pid)
+
+
+@test("fake")
+async def gemini_streams_tools_and_resumes():
+    await use("gemini")
+    app.events.visible = True
+    decky.emitted.clear()
+    await plugin.send("use a tool")
+    await idle()
+    assert app.chat.status == "idle", app.chat.error
+    assert roles() == [
+        ("user", "use a tool"),
+        ("assistant", "Gemini says hi"),
+        ("tool", "run_shell_command: ls /home"),
+        ("assistant", "Done."),
+    ], roles()
+    assert emitted("chat_partial"), decky.emitted
+    first = agent_calls("gemini")[-1]
+    assert first["prompt"] == SYSTEM_PROMPT + "\n\nuse a tool" and first["trust"] == "true", first
+    assert first["args"][first["args"].index("--approval-mode") + 1] == "default"
+    assert "--resume" not in first["args"]
+    await plugin.send("again")
+    await idle()
+    second = agent_calls("gemini")[-1]
+    assert second["prompt"] == "again" and second["args"][second["args"].index("--resume") + 1] == "gem-1", second
+
+
+@test("fake")
+async def gemini_sees_only_the_screenshot():
+    await use("gemini")
+    data = b"\xff\xd8gemini\xff\xd9"
+    app.chat.attach(fake_shot("gemini-shot.jpg", data))
+    await plugin.send("what is this")
+    await idle()
+    call = agent_calls("gemini")[-1]
+    assert call["image_bytes"] == len(data) and call["include_listing"] == ["screen.jpg"], call
+    image = call["prompt"].split(" ", 1)[0][1:]
+    assert call["prompt"] == f"@{image} {SYSTEM_PROMPT}\n\nwhat is this", call["prompt"]
+    assert not os.path.exists(os.path.dirname(image))
+
+
+@test("fake")
+async def gemini_api_error_is_readable():
+    await use("gemini")
+    await plugin.send("fail now")
+    await idle()
+    assert roles()[-1] == ("error", "API key not valid. Please pass a valid API key."), roles()
+    assert app.chat.state()["authNeeded"] is True
+
+
+@test("fake")
+async def gemini_api_key_and_logout_keep_other_settings():
+    await use("gemini")
+    with open(gemini_file(".env"), "w") as handle:
+        handle.write("OTHER=1\n")
+    await plugin.auth_logout()
+    await plugin.auth_login("api_key")
+    await until(lambda: app.auth.phase == "waiting")
+    assert app.auth.state()["url"] == "https://aistudio.google.com/apikey"
+    assert (await plugin.auth_submit(" AIza-test ")) == {"ok": True}
+    await until(lambda: app.auth.phase == "done")
+    assert open(gemini_file(".env")).read() == "OTHER=1\nGEMINI_API_KEY=AIza-test\n"
+    assert oct(os.stat(gemini_file(".env")).st_mode & 0o777) == "0o600"
+    assert app.auth.state()["status"]["method"] == "GEMINI_API_KEY"
+    await plugin.send("hi")
+    await idle()
+    assert roles()[-1] == ("assistant", "Gemini says hi"), roles()
+    state = await plugin.auth_logout()
+    assert not state["status"]["loggedIn"], state
+    assert open(gemini_file(".env")).read() == "OTHER=1\n"
+    assert open(gemini_file(".env.claude-decky-backup")).read() == "OTHER=1\nGEMINI_API_KEY=AIza-test\n"
+    assert not os.path.exists(gemini_file("oauth_creds.json"))
+    settings = json.load(open(gemini_file("settings.json")))
+    assert "selectedType" not in settings["security"]["auth"], settings
+
+
+@test("fake")
+async def switching_keeps_each_conversation():
+    await use("claude")
+    await plugin.send("hi")
+    await idle()
+    state = await plugin.update_settings({"provider": "codex"})
+    assert state["chat"]["messages"][-1]["role"] == "note", state["chat"]["messages"][-1]
+    assert state["chat"]["messages"][-1]["text"] == "Now using Codex. It doesn't see the messages above."
+    assert state["auth"]["provider"] == "codex"
+    await plugin.send("hi codex")
+    await idle()
+    assert "resume" not in agent_calls("codex")[-1]["args"]
+    await plugin.update_settings({"provider": "claude"})
+    await plugin.send("back")
+    await idle()
+    args = calls()[-1]["args"]
+    assert args[args.index("--resume") + 1] == "sess-1", args
+    assert app.chat.sessions == {"claude": "sess-1", "codex": "thr-1"}, app.chat.sessions
+
+
+@test("fake")
+async def old_chat_file_keeps_claude_session():
+    await use("claude")
+    with open(os.path.join(os.environ["HARNESS_SETTINGS"], "chat.json"), "w") as handle:
+        json.dump({"session_id": "legacy", "messages": [{"role": "user", "text": "old", "time": 1}]}, handle)
+    app.chat.load()
+    assert app.chat.sessions == {"claude": "legacy"} and app.chat.state()["resumable"] is True
+    await plugin.new_chat()
 
 
 @test("live")

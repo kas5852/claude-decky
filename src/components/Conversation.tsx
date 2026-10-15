@@ -1,7 +1,7 @@
 import { DialogButton, Focusable } from "@decky/ui";
 import { ReactElement, useState } from "react";
 import { RiCameraLine, RiMicLine, RiTerminalLine } from "react-icons/ri";
-import { AppState, Message, send, SHORTCUT_LABELS } from "../api";
+import { AppState, Message, agentName, send, SHORTCUT_LABELS } from "../api";
 import { BlockView, parseBlocks } from "../markdown";
 import { patchStore } from "../store";
 import { theme } from "../theme";
@@ -16,21 +16,22 @@ const SUGGESTIONS = [
 function groupExchanges(messages: Message[]): Message[][] {
   const exchanges: Message[][] = [];
   for (const message of messages) {
-    if (message.role === "user" || exchanges.length === 0) exchanges.push([]);
+    if (message.role === "user" || message.role === "note" || exchanges.length === 0) exchanges.push([]);
     exchanges[exchanges.length - 1].push(message);
   }
   return exchanges.reverse();
 }
 
-function UserBubble({ message }: { message: Message }) {
+function UserBubble({ message, agent }: { message: Message; agent?: string }) {
   return (
     <Focusable
       style={theme.userBubble}
       onActivate={() => patchStore({ draft: message.text })}
       onOKActionDescription="Edit and ask again"
     >
-      {(message.via === "voice" || message.image) && (
+      {(message.via === "voice" || message.image || agent) && (
         <div style={{ ...theme.meta, display: "flex", gap: "8px", marginBottom: "2px", color: theme.colors.accent }}>
+          {agent && <span>to {agent}</span>}
           {message.via === "voice" && (
             <span style={{ display: "flex", alignItems: "center", gap: "3px" }}>
               <RiMicLine size={11} /> voice
@@ -82,7 +83,7 @@ function Reply({ text }: { text: string }) {
   );
 }
 
-function Exchange({ messages, partial }: { messages: Message[]; partial?: string }) {
+function Exchange({ messages, partial, app, mixed }: { messages: Message[]; partial?: string; app: AppState; mixed: boolean }) {
   const parts: ReactElement[] = [];
   let steps: Message[] = [];
   const flushSteps = (key: string) => {
@@ -97,7 +98,14 @@ function Exchange({ messages, partial }: { messages: Message[]; partial?: string
       return;
     }
     flushSteps(`steps-${index}`);
-    if (message.role === "user") parts.push(<UserBubble key={index} message={message} />);
+    if (message.role === "note")
+      parts.push(
+        <div key={index} style={{ ...theme.meta, textAlign: "center", padding: "2px 0" }}>
+          {message.text}
+        </div>,
+      );
+    else if (message.role === "user")
+      parts.push(<UserBubble key={index} message={message} agent={mixed ? agentName(app, message.agent) : undefined} />);
     else if (message.role === "assistant") parts.push(<Reply key={index} text={message.text} />);
     else
       parts.push(
@@ -119,6 +127,7 @@ function Exchange({ messages, partial }: { messages: Message[]; partial?: string
 
 export function Conversation({ app, partial }: { app: AppState; partial: string }) {
   const exchanges = groupExchanges(app.chat.messages);
+  const mixed = new Set(app.chat.messages.filter((message) => message.role === "user").map((message) => message.agent ?? "claude")).size > 1;
   const working = app.chat.status === "working";
   if (exchanges.length === 0) {
     return (
@@ -155,7 +164,7 @@ export function Conversation({ app, partial }: { app: AppState; partial: string 
             borderBottom: index === exchanges.length - 1 ? "none" : `1px solid ${theme.colors.cardLine}`,
           }}
         >
-          <Exchange messages={exchange} partial={index === 0 && working ? partial : undefined} />
+          <Exchange messages={exchange} app={app} mixed={mixed} partial={index === 0 && working ? partial : undefined} />
         </div>
       ))}
     </div>

@@ -1,6 +1,6 @@
 import asyncio
+import contextlib
 import fcntl
-import json
 import os
 import re
 import signal
@@ -8,44 +8,28 @@ import struct
 import termios
 import time
 
-import decky
-
-from .env import CLAUDE, HOME, child_env, find_program, run
+from .env import HOME, child_env, find_program, run
 from .phone import PhonePage
 
-CLAUDE_SETTINGS = os.path.join(HOME, ".claude", "settings.json")
-CREDENTIALS = os.path.join(HOME, ".claude", ".credentials.json")
-TOKEN_KEYS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 ESCAPES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\r")
-LOGIN_URL = re.compile(r"https://\S*oauth/authorize\?\S+")
 LOGIN_TIMEOUT = 15 * 60
-INSTALL_SCRIPT = "https://claude.ai/install.sh"
+API_KEY_FLOW = "api_key"
 
 
 def strip_terminal(text):
     return ESCAPES.sub("", text)
 
 
-def read_json(path):
-    try:
-        with open(path) as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
-        return None
-
-
-def stored_token_keys():
-    env = (read_json(CLAUDE_SETTINGS) or {}).get("env") or {}
-    return [key for key in TOKEN_KEYS if env.get(key)]
-
-
 class Auth:
-    def __init__(self, events):
+    def __init__(self, events, settings, providers):
         self.events = events
+        self.settings = settings
+        self.providers = providers
         self.phase = "idle"
-        self.url = ""
+        self.flow = ""
+        self.prompt = None
         self.error = ""
-        self.status = None
+        self.statuses = {}
         self.checked_at = 0.0
         self.process = None
         self.master = None
@@ -54,51 +38,43 @@ class Auth:
         self.phone = PhonePage(self.submit_code)
         self.phone.on_ready = self.changed
         self.install_log = ""
+        self.active = None
+        self.login_started = 0.0
+
+    @property
+    def provider(self):
+        return self.providers[self.settings["provider"]]
 
     def installed(self):
-        return os.access(CLAUDE, os.X_OK)
+        return self.provider.installed()
 
     def quick_status(self):
-        if not self.installed():
+        provider = self.provider
+        if not provider.installed():
             return {"installed": False, "loggedIn": False, "method": "none"}
-        if self.status is not None:
-            return self.status
-        keys = stored_token_keys()
-        if keys:
-            return {"installed": True, "loggedIn": True, "method": keys[0], "guess": True}
-        if os.path.exists(CREDENTIALS):
-            return {"installed": True, "loggedIn": True, "method": "claude.ai", "guess": True}
-        return {"installed": True, "loggedIn": False, "method": "none", "guess": True}
+        if provider.live_status:
+            return provider.quick_status()
+        return self.statuses.get(provider.id) or provider.quick_status()
 
     async def refresh(self):
-        if not self.installed():
-            self.status = {"installed": False, "loggedIn": False, "method": "none"}
-            return self.state()
-        code, out, _ = await run([CLAUDE, "auth", "status", "--json"], timeout=20)
-        try:
-            data = json.loads(out.decode())
-        except ValueError:
-            data = {"loggedIn": False, "authMethod": "unknown"}
-        status = {
-            "installed": True,
-            "loggedIn": bool(data.get("loggedIn")),
-            "method": data.get("authMethod") or "none",
-        }
-        for key in ("email", "orgName", "subscriptionType"):
-            if data.get(key):
-                status[key] = data[key]
-        self.status = status
+        provider = self.provider
+        self.statuses[provider.id] = await provider.status()
         self.checked_at = time.time()
         return self.state()
 
     def forget(self):
-        self.status = None
+        self.statuses.pop(self.provider.id, None)
 
     def state(self):
+        prompt = self.prompt
         return {
+            "provider": self.provider.id,
             "status": self.quick_status(),
             "phase": self.phase,
-            "url": self.url,
+            "flow": self.flow,
+            "url": prompt.url if prompt else "",
+            "userCode": prompt.user_code if prompt else "",
+            "wantsCode": bool(prompt and prompt.wants_code),
             "phoneUrl": self.phone.url if self.phase == "waiting" else "",
             "error": self.error,
             "installLog": self.install_log[-600:],
@@ -107,25 +83,40 @@ class Auth:
     def changed(self):
         self.events.emit("auth_state", self.state())
 
-    async def login(self, console=False):
-        if not self.installed():
-            return self.fail("Install Claude Code first")
+    async def login(self, flow=""):
+        provider = self.provider
+        if not provider.installed():
+            return self.fail(f"Install {provider.label} first")
+        flow = flow if flow in provider.login_flows else next(iter(provider.login_flows))
         await self.cancel()
-        self.phase = "starting"
+        self.active = provider
+        self.flow = flow
         self.error = ""
-        self.url = ""
+        self.prompt = None
         self.output = ""
+        if flow == API_KEY_FLOW:
+            self.phase = "waiting"
+            self.prompt = provider.api_key_prompt()
+            self.phone.start(self.prompt.url, kind="key", title=provider.label)
+            self.timeout = asyncio.get_running_loop().call_later(LOGIN_TIMEOUT, self.expire)
+            self.changed()
+            return self.state()
+        self.phase = "starting"
+        self.login_started = time.time()
         self.changed()
+        provider.before_login(flow)
         master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 4000, 0, 0))
-        args = [CLAUDE, "auth", "login", "--console" if console else "--claudeai"]
+        env = {"TERM": "xterm-256color", "BROWSER": "/bin/false", "COLUMNS": "4000"}
+        env.update(provider.login_env(flow))
         try:
             self.process = await asyncio.create_subprocess_exec(
-                *args,
+                *provider.login_args(flow),
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
-                env=child_env({"TERM": "xterm-256color", "BROWSER": "/bin/false", "COLUMNS": "4000"}),
+                env=child_env(env),
+                cwd=HOME,
                 start_new_session=True,
             )
         finally:
@@ -149,12 +140,15 @@ class Auth:
             self.close_master()
             return
         self.output = (self.output + strip_terminal(chunk.decode(errors="replace")))[-20000:]
-        if not self.url:
-            found = LOGIN_URL.search(self.output)
-            if found and ("\n" in self.output[found.end():] or "Paste" in self.output[found.end():]):
-                self.url = found.group(0)
+        if self.check_verdict():
+            return
+        if self.prompt is None and self.active is not None:
+            prompt = self.active.scan_login(self.output)
+            if prompt:
+                self.prompt = prompt
                 self.phase = "waiting"
-                self.phone.start(self.url)
+                if prompt.wants_code:
+                    self.phone.start(prompt.url, kind="code", title=self.active.label)
                 self.changed()
 
     async def watch(self, process):
@@ -168,8 +162,8 @@ class Auth:
         self.process = None
         self.stop_timer()
         self.phone.stop()
+        self.prompt = None
         if code == 0:
-            self.url = ""
             self.forget()
             await self.refresh()
             self.phase = "done"
@@ -177,20 +171,86 @@ class Auth:
             lines = [line.strip() for line in self.output.splitlines() if line.strip()]
             failure = next((line for line in reversed(lines) if "fail" in line.lower() or "error" in line.lower()), "")
             self.phase = "failed"
-            self.error = failure or f"Login exited with code {code}"
-            self.url = ""
+            self.error = failure or f"Sign-in exited with code {code}"
         self.changed()
 
     def submit_code(self, code):
         code = "".join((code or "").split())
         if not code:
-            return {"ok": False, "error": "Enter the code from the sign-in page"}
-        if self.phase != "waiting" or self.master is None:
-            return {"ok": False, "error": "No sign-in is waiting for a code"}
-        os.write(self.master, code.encode() + b"\r")
+            return {"ok": False, "error": "Enter the code or key first"}
+        if self.phase != "waiting" or self.active is None:
+            return {"ok": False, "error": "No sign-in is waiting"}
+        if self.flow == API_KEY_FLOW:
+            self.phase = "checking"
+            self.changed()
+            asyncio.get_running_loop().create_task(self.store_key(self.active, code))
+            return {"ok": True}
+        if self.master is None or not (self.prompt and self.prompt.wants_code):
+            return {"ok": False, "error": "This sign-in doesn't take a code here"}
+        self.output = ""
+        self.error = ""
+        os.write(self.master, self.active.code_input(code))
         self.phase = "checking"
         self.changed()
+        if not self.active.login_exits:
+            asyncio.get_running_loop().call_later(1, self.poll_verdict)
         return {"ok": True}
+
+    def check_verdict(self):
+        if self.phase != "checking" or self.active is None or self.active.login_exits:
+            return False
+        verdict = self.active.login_verdict(self.output, self.login_started)
+        if verdict == "done":
+            self.phase = "finishing"
+            asyncio.get_running_loop().create_task(self.complete())
+            return True
+        if verdict:
+            self.error = verdict
+            self.prompt = None
+            self.phase = "starting"
+            self.changed()
+        return False
+
+    def poll_verdict(self):
+        if self.phase == "checking" and self.master is not None:
+            self.check_verdict()
+            asyncio.get_running_loop().call_later(1, self.poll_verdict)
+
+    async def complete(self):
+        provider = self.active
+        process = self.process
+        self.process = None
+        self.stop_timer()
+        self.phone.stop()
+        if process and process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+            try:
+                await asyncio.wait_for(process.wait(), 5)
+            except asyncio.TimeoutError:
+                os.killpg(process.pid, signal.SIGKILL)
+        self.close_master()
+        self.prompt = None
+        self.active = None
+        self.statuses.pop(provider.id, None)
+        await self.refresh()
+        self.phase = "done"
+        self.error = ""
+        self.changed()
+
+    async def store_key(self, provider, key):
+        result = await provider.save_api_key(key)
+        self.stop_timer()
+        self.phone.stop()
+        self.prompt = None
+        if result.get("ok"):
+            self.statuses.pop(provider.id, None)
+            await self.refresh()
+            self.phase = "done"
+        else:
+            self.phase = "failed"
+            self.error = result.get("error", "Could not save the key")
+        self.changed()
 
     def close_master(self):
         if self.master is not None:
@@ -225,7 +285,8 @@ class Auth:
             except asyncio.TimeoutError:
                 os.killpg(process.pid, signal.SIGKILL)
         self.close_master()
-        self.url = ""
+        self.prompt = None
+        self.active = None
         self.phase = "failed" if reason else "idle"
         self.error = reason
         self.changed()
@@ -239,24 +300,7 @@ class Auth:
 
     async def logout(self):
         await self.cancel()
-        if self.installed():
-            await run([CLAUDE, "auth", "logout"], timeout=20)
-        settings = read_json(CLAUDE_SETTINGS)
-        env = (settings or {}).get("env") or {}
-        removed = [key for key in TOKEN_KEYS if key in env]
-        if removed:
-            backup = CLAUDE_SETTINGS + ".claude-decky-backup"
-            with open(CLAUDE_SETTINGS) as source, open(backup, "w") as target:
-                target.write(source.read())
-            os.chmod(backup, 0o600)
-            for key in removed:
-                env.pop(key)
-            temporary = CLAUDE_SETTINGS + ".tmp"
-            with open(temporary, "w") as handle:
-                json.dump(settings, handle, indent=2)
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, CLAUDE_SETTINGS)
-            decky.logger.info("Removed %s from %s, backup at %s", removed, CLAUDE_SETTINGS, backup)
+        await self.provider.logout()
         self.forget()
         self.phase = "idle"
         self.error = ""
@@ -265,29 +309,38 @@ class Auth:
         return self.state()
 
     async def install(self):
+        provider = self.provider
         curl = find_program("curl")
         bash = find_program("bash")
         if not curl or not bash:
-            return self.fail("curl and bash are needed to install Claude Code")
+            return self.fail(f"curl and bash are needed to install {provider.label}")
         self.phase = "installing"
         self.error = ""
         self.install_log = ""
         self.changed()
         code, out, err = await run(
-            [bash, "-c", f"set -o pipefail; {curl} -fsSL {INSTALL_SCRIPT} | {bash}"],
-            timeout=600,
+            [bash, "-c", "set -o pipefail; " + provider.install_script()],
+            timeout=900,
             cwd=HOME,
         )
         self.install_log = strip_terminal((out + err).decode(errors="replace"))
         self.forget()
-        if code != 0 or not self.installed():
+        if code != 0 or not provider.installed():
             self.phase = "failed"
             self.error = "Install failed, see the log below"
         else:
+            provider.after_install()
             self.phase = "idle"
         await self.refresh()
         self.changed()
         return self.state()
+
+    async def switched(self):
+        await self.cancel()
+        self.install_log = ""
+        if self.provider.id not in self.statuses:
+            await self.refresh()
+        self.changed()
 
     async def shutdown(self):
         await self.cancel()

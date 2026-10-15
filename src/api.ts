@@ -1,6 +1,6 @@
 import { callable } from "@decky/api";
 
-export type Role = "user" | "assistant" | "tool" | "error";
+export type Role = "user" | "assistant" | "tool" | "error" | "note";
 
 export interface Message {
   role: Role;
@@ -8,6 +8,7 @@ export interface Message {
   time: number;
   via?: "voice";
   image?: boolean;
+  agent?: string;
 }
 
 export interface ChatState {
@@ -47,16 +48,23 @@ export interface AuthStatus {
 }
 
 export interface AuthState {
+  provider: string;
   status: AuthStatus;
-  phase: "idle" | "starting" | "waiting" | "checking" | "done" | "failed" | "installing";
+  phase: "idle" | "starting" | "waiting" | "checking" | "finishing" | "done" | "failed" | "installing";
+  flow: string;
   url: string;
+  userCode: string;
+  wantsCode: boolean;
   phoneUrl: string;
   error: string;
   installLog: string;
 }
 
 export interface Settings {
+  provider: string;
   model: string;
+  codex_model: string;
+  gemini_model: string;
   workdir: string;
   voice_model: string;
   shortcut: string;
@@ -65,12 +73,33 @@ export interface Settings {
   low_priority: boolean;
 }
 
+export interface ProviderInfo {
+  id: string;
+  label: string;
+  short: string;
+  models: Record<string, string>;
+  modelKey: "model" | "codex_model" | "gemini_model";
+  loginFlows: Record<string, string>;
+  installHint: string;
+  toolsOffHint: string;
+}
+
 export interface AppState {
   chat: ChatState;
   voice: VoiceState;
   auth: AuthState;
   settings: Settings;
+  providers: ProviderInfo[];
   padDevices: string[];
+}
+
+export function currentProvider(app: AppState | null): ProviderInfo | undefined {
+  return app?.providers.find((provider) => provider.id === app.settings.provider);
+}
+
+export function agentName(app: AppState | null, id?: string): string {
+  const provider = app?.providers.find((item) => item.id === (id ?? app?.settings.provider));
+  return provider?.short ?? "Claude";
 }
 
 export interface Result {
@@ -101,11 +130,11 @@ export const voiceDownload = callable<[name: string], Result>("voice_download");
 export const voiceDelete = callable<[name: string], VoiceState>("voice_delete");
 export const updateSettings = callable<[patch: Partial<Settings>], AppState>("update_settings");
 export const authRefresh = callable<[], AuthState>("auth_refresh");
-export const authLogin = callable<[console: boolean], AuthState>("auth_login");
+export const authLogin = callable<[flow: string], AuthState>("auth_login");
 export const authSubmit = callable<[code: string], Result>("auth_submit");
 export const authCancel = callable<[], AuthState>("auth_cancel");
 export const authLogout = callable<[], AuthState>("auth_logout");
-export const installClaude = callable<[], AuthState>("install_claude");
+export const installAgent = callable<[], AuthState>("install_agent");
 
 export const SHORTCUT_LABELS: Record<string, string> = {
   off: "Off",
@@ -126,11 +155,4 @@ export const VOICE_MODEL_DETAILS: Record<string, string> = {
   "base.en": "English, fast and accurate. Recommended.",
   "small.en": "English, most accurate, about 3x slower.",
   base: "Any language, same speed as Base.",
-};
-
-export const CLAUDE_MODEL_LABELS: Record<string, string> = {
-  "": "Default",
-  haiku: "Haiku (fastest)",
-  sonnet: "Sonnet",
-  opus: "Opus (smartest)",
 };

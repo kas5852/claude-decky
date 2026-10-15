@@ -13,7 +13,7 @@ import { addEventListener, definePlugin, removeEventListener, toaster, useQuickA
 import { useEffect } from "react";
 import { RiAddLine, RiChat3Line, RiSettings3Line } from "react-icons/ri";
 import { PluginIcon } from "./icon";
-import { AppState, AuthState, ChatState, Notice, VoiceState, getState, newChat, setVisible } from "./api";
+import { AppState, AuthState, ChatState, Notice, VoiceState, agentName, currentProvider, getState, newChat, setVisible } from "./api";
 import { Composer, isTalkButton, talkDown, talkUp } from "./components/Composer";
 import { Conversation } from "./components/Conversation";
 import { SettingsView } from "./components/SettingsView";
@@ -40,14 +40,14 @@ function onVoice(voice: VoiceState) {
   if (getStore().panelOpen || voice.origin !== "pad") return;
   if (voice.phase === "recording" && previous !== "recording") {
     toaster.toast({
-      title: "Claude is listening",
+      title: `${agentName(getStore().app)} is listening`,
       body: "Release to send · tap once for hands-free",
       icon,
       duration: 3500,
       playSound: false,
     });
   } else if (voice.phase === "error" || (voice.phase === "idle" && voice.error && previous !== "idle")) {
-    toaster.toast({ title: "Claude voice", body: voice.error, icon });
+    toaster.toast({ title: "Voice", body: voice.error, icon });
   }
 }
 
@@ -59,7 +59,7 @@ function onNotice(notice: Notice) {
 function onReply(reply: string) {
   if (getStore().panelOpen) return;
   toaster.toast({
-    title: "Claude",
+    title: agentName(getStore().app),
     body: shorten(reply || "Done", 220),
     icon,
     duration: 12000,
@@ -75,7 +75,7 @@ function TitleView() {
   return (
     <Focusable style={{ display: "flex", alignItems: "center", gap: "6px", width: "100%" }} flow-children="horizontal">
       <div className={staticClasses.Title} style={{ flex: 1, paddingTop: 0, boxShadow: "none" }}>
-        {settings ? "Settings" : "Claude"}
+        {settings ? "Settings" : agentName(store.app)}
       </div>
       {!settings && hasMessages && (
         <DialogButton style={buttonStyle} onClick={() => newChat().then(setChat)} onOKActionDescription="New chat">
@@ -93,12 +93,16 @@ function TitleView() {
   );
 }
 
-function SignInHint() {
+function SignInHint({ app }: { app: AppState }) {
+  const label = currentProvider(app)?.label ?? "Claude Code";
+  const installed = app.auth.status.installed;
   return (
     <PanelSectionRow>
       <div style={{ ...theme.card, display: "flex", flexDirection: "column", gap: "8px" }}>
-        <div style={{ ...theme.base, fontSize: "13px" }}>Sign in to your Claude account to start asking.</div>
-        <DialogButton onClick={() => patchStore({ view: "settings" })}>Sign in</DialogButton>
+        <div style={{ ...theme.base, fontSize: "13px" }}>
+          {installed ? `Sign in to ${label} to start asking.` : `${label} isn't installed yet.`}
+        </div>
+        <DialogButton onClick={() => patchStore({ view: "settings" })}>{installed ? "Sign in" : "Set up"}</DialogButton>
       </div>
     </PanelSectionRow>
   );
@@ -145,7 +149,7 @@ function Content() {
       actionDescriptionMap={talk ? { [GamepadButton.SECONDARY]: "Hold to talk" } : {}}
     >
       <PanelSection>
-        {needsSignIn && <SignInHint />}
+        {needsSignIn && <SignInHint app={app} />}
         <PanelSectionRow>
           <Composer app={app} />
         </PanelSectionRow>

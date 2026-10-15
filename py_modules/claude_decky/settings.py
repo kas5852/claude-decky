@@ -2,13 +2,16 @@ import json
 import os
 
 from .env import SETTINGS_DIR
+from .providers import PROVIDERS
 
 SETTINGS_FILE = os.path.join(SETTINGS_DIR, "settings.json")
 SHORTCUTS = ("off", "l3_r3", "view_menu", "lb_rb_y")
-MODELS = ("", "haiku", "sonnet", "opus")
 VOICE_MODELS = ("tiny.en", "base.en", "small.en", "base")
 DEFAULTS = {
+    "provider": "claude",
     "model": "",
+    "codex_model": "",
+    "gemini_model": "",
     "workdir": "",
     "voice_model": "base.en",
     "shortcut": "l3_r3",
@@ -17,7 +20,8 @@ DEFAULTS = {
     "low_priority": True,
 }
 CHOICES = {
-    "model": MODELS,
+    "provider": tuple(PROVIDERS),
+    **{provider.model_key: tuple(provider.models) for provider in PROVIDERS.values()},
     "voice_model": VOICE_MODELS,
     "shortcut": SHORTCUTS,
 }

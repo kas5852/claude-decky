@@ -1,7 +1,7 @@
 import { ConfirmModal, DialogButton, Focusable, TextField, showModal } from "@decky/ui";
 import { useMemo, useState } from "react";
 import { encode } from "uqr";
-import { AuthState, authCancel, authLogin, authLogout, authRefresh, authSubmit, installClaude } from "../api";
+import { AuthState, ProviderInfo, authCancel, authLogin, authLogout, authRefresh, authSubmit, installAgent } from "../api";
 import { theme } from "../theme";
 
 function QrCode({ text, size }: { text: string; size: number }) {
@@ -28,17 +28,52 @@ function QrCode({ text, size }: { text: string; size: number }) {
   );
 }
 
+const METHOD_LABELS: Record<string, string> = {
+  CLAUDE_CODE_OAUTH_TOKEN: "Long-lived token",
+  oauth_token: "Long-lived token",
+  ANTHROPIC_API_KEY: "API key",
+  OPENAI_API_KEY: "API key",
+  GEMINI_API_KEY: "API key",
+  api_key: "API key",
+  "claude.ai": "Claude account",
+  chatgpt: "ChatGPT account",
+  google: "Google account",
+};
+
 function methodLabel(method: string) {
-  if (method === "CLAUDE_CODE_OAUTH_TOKEN" || method === "oauth_token") return "Long-lived token";
-  if (method === "ANTHROPIC_API_KEY" || method === "api_key") return "API key";
-  if (method === "claude.ai") return "Claude account";
-  return method;
+  return METHOD_LABELS[method] ?? method;
+}
+
+function DeviceCode({ auth }: { auth: AuthState }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      <QrCode text={auth.url} size={168} />
+      <div style={{ ...theme.base, fontSize: "13px" }}>Scan with your phone, sign in, then enter this code:</div>
+      <div
+        style={{
+          fontFamily: "ui-monospace, 'DejaVu Sans Mono', monospace",
+          fontSize: "22px",
+          letterSpacing: "0.12em",
+          textAlign: "center",
+          color: theme.colors.strong,
+          background: "rgba(255,255,255,0.06)",
+          borderRadius: "8px",
+          padding: "6px",
+        }}
+      >
+        {auth.userCode}
+      </div>
+      <div style={theme.meta}>This screen updates by itself once you're signed in.</div>
+      <DialogButton onClick={() => authCancel()}>Cancel</DialogButton>
+    </div>
+  );
 }
 
 function SignInFlow({ auth }: { auth: AuthState }) {
   const [direct, setDirect] = useState(false);
   const [code, setCode] = useState("");
   const [notice, setNotice] = useState("");
+  const keyFlow = auth.flow === "api_key";
   const usePhone = Boolean(auth.phoneUrl) && !direct;
   const qrText = usePhone ? auth.phoneUrl : auth.url;
 
@@ -49,25 +84,28 @@ function SignInFlow({ auth }: { auth: AuthState }) {
   };
 
   if (auth.phase === "starting") return <div style={theme.meta}>Starting sign-in…</div>;
-  if (auth.phase === "checking") return <div style={{ ...theme.base, fontSize: "13px" }}>Checking the code…</div>;
+  if (auth.phase === "checking" || auth.phase === "finishing")
+    return <div style={{ ...theme.base, fontSize: "13px" }}>Checking…</div>;
+  if (auth.userCode && !auth.wantsCode) return <DeviceCode auth={auth} />;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      {auth.error && <div style={{ fontSize: "12px", color: theme.colors.danger }}>{auth.error}</div>}
       <QrCode text={qrText} size={usePhone ? 168 : 200} />
       <div style={{ ...theme.base, fontSize: "13px" }}>
-        {usePhone ? (
-          <>
-            Scan with your phone (same Wi-Fi). Sign in there, tap <b>Copy Code</b>, then paste it on that page.
-          </>
-        ) : (
-          <>Scan with your phone and sign in. Then type the code it shows below.</>
-        )}
+        {usePhone
+          ? keyFlow
+            ? "Scan with your phone (same Wi-Fi). Create an API key there and paste it on that page."
+            : "Scan with your phone (same Wi-Fi). Sign in there, copy the code, then paste it on that page."
+          : keyFlow
+            ? "Scan to open the API key page. Then type the key below."
+            : "Scan with your phone and sign in. Then type the code it shows below."}
       </div>
       {!usePhone && (
         <>
-          <TextField value={code} onChange={(event) => setCode(event.target.value)} />
+          <TextField value={code} bIsPassword={keyFlow} onChange={(event) => setCode(event.target.value)} />
           <DialogButton disabled={!code.trim()} onClick={submit}>
-            Submit code
+            {keyFlow ? "Save key" : "Submit code"}
           </DialogButton>
         </>
       )}
@@ -75,7 +113,7 @@ function SignInFlow({ auth }: { auth: AuthState }) {
       <Focusable style={theme.row} flow-children="horizontal">
         {auth.phoneUrl && (
           <DialogButton style={{ ...theme.smallButton, flex: 1 }} onClick={() => setDirect(!direct)}>
-            {usePhone ? "Type code here" : "Use phone page"}
+            {usePhone ? (keyFlow ? "Type key here" : "Type code here") : "Use phone page"}
           </DialogButton>
         )}
         <DialogButton style={{ ...theme.smallButton, flex: 1 }} onClick={() => authCancel()}>
@@ -86,15 +124,15 @@ function SignInFlow({ auth }: { auth: AuthState }) {
   );
 }
 
-export function Account({ auth }: { auth: AuthState }) {
+export function Account({ auth, provider }: { auth: AuthState; provider: ProviderInfo }) {
   const { status } = auth;
-  const waiting = ["starting", "waiting", "checking"].includes(auth.phase);
+  const waiting = ["starting", "waiting", "checking", "finishing"].includes(auth.phase);
 
   const logout = () =>
     showModal(
       <ConfirmModal
-        strTitle="Sign out of Claude?"
-        strDescription="Claude Code on this handheld will be signed out, including the terminal. Saved tokens in ~/.claude/settings.json are removed (a backup is kept next to it)."
+        strTitle={`Sign out of ${provider.label}?`}
+        strDescription={`${provider.label} on this handheld will be signed out, including in the terminal. Saved tokens and keys are removed, and a backup is kept next to them.`}
         strOKButtonText="Sign out"
         onOK={() => authLogout()}
       />,
@@ -106,10 +144,10 @@ export function Account({ auth }: { auth: AuthState }) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
         <div style={{ ...theme.base, fontSize: "13px" }}>
-          Claude Code isn't installed for this user yet. It installs to ~/.local/bin, no admin rights needed.
+          {provider.label} isn't installed for this user yet. {provider.installHint}
         </div>
-        <DialogButton disabled={auth.phase === "installing"} onClick={() => installClaude()}>
-          {auth.phase === "installing" ? "Installing…" : "Install Claude Code"}
+        <DialogButton disabled={auth.phase === "installing"} onClick={() => installAgent()}>
+          {auth.phase === "installing" ? "Installing…" : `Install ${provider.label}`}
         </DialogButton>
         {auth.error && <div style={{ fontSize: "12px", color: theme.colors.danger }}>{auth.error}</div>}
         {auth.installLog && auth.phase !== "installing" && <pre style={theme.codeBlock}>{auth.installLog}</pre>}
@@ -152,10 +190,15 @@ export function Account({ auth }: { auth: AuthState }) {
         </Focusable>
       ) : (
         <>
-          <DialogButton onClick={() => authLogin(false)}>Sign in with Claude</DialogButton>
-          <DialogButton style={{ fontSize: "12px", padding: "6px" }} onClick={() => authLogin(true)}>
-            Use an Anthropic Console account instead
-          </DialogButton>
+          {Object.entries(provider.loginFlows).map(([flow, label], index) => (
+            <DialogButton
+              key={flow}
+              style={index === 0 ? undefined : { fontSize: "12px", padding: "6px" }}
+              onClick={() => authLogin(flow)}
+            >
+              {label}
+            </DialogButton>
+          ))}
         </>
       )}
     </div>

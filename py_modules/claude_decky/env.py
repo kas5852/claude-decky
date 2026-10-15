@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 
 import decky
@@ -11,6 +12,14 @@ RUNTIME_DIR = decky.DECKY_PLUGIN_RUNTIME_DIR
 LOCAL_BIN = os.path.join(HOME, ".local", "bin")
 CLAUDE = os.path.join(LOCAL_BIN, "claude")
 SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin"
+
+
+def read_json(path):
+    try:
+        with open(path) as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
 
 
 def runtime_path(*parts):

@@ -1,7 +1,6 @@
 import { DialogButton, DropdownItem, PanelSection, PanelSectionRow, ToggleField } from "@decky/ui";
 import {
   AppState,
-  CLAUDE_MODEL_LABELS,
   SHORTCUT_LABELS,
   Settings,
   VOICE_MODEL_DETAILS,
@@ -9,6 +8,7 @@ import {
   updateSettings,
   voiceDelete,
   voiceDownload,
+  currentProvider,
 } from "../api";
 import { setApp } from "../store";
 import { theme } from "../theme";
@@ -71,11 +71,23 @@ function VoiceModel({ app }: { app: AppState }) {
 
 export function SettingsView({ app }: { app: AppState }) {
   const { settings } = app;
+  const provider = currentProvider(app) ?? app.providers[0];
+  const busy = app.chat.status === "working";
   return (
     <>
-      <PanelSection title="Account">
+      <PanelSection title="Assistant">
         <PanelSectionRow>
-          <Account auth={app.auth} />
+          <DropdownItem
+            label="Answer with"
+            description={busy ? "Wait for the current answer to finish to switch." : "Each assistant keeps its own conversation and sign-in."}
+            rgOptions={app.providers.map((item) => ({ data: item.id, label: item.label }))}
+            selectedOption={settings.provider}
+            disabled={busy}
+            onChange={(option) => change({ provider: option.data })}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <Account auth={app.auth} provider={provider} />
         </PanelSectionRow>
       </PanelSection>
       <PanelSection title="Voice">
@@ -93,7 +105,7 @@ export function SettingsView({ app }: { app: AppState }) {
         <PanelSectionRow>
           <ToggleField
             label="Send the screen with the shortcut"
-            description="Claude sees what you're looking at when you ask in game."
+            description={`${provider.short} sees what you're looking at when you ask in game.`}
             checked={settings.shortcut_screen}
             onChange={(value) => change({ shortcut_screen: value })}
           />
@@ -106,19 +118,19 @@ export function SettingsView({ app }: { app: AppState }) {
           </PanelSectionRow>
         )}
       </PanelSection>
-      <PanelSection title="Claude">
+      <PanelSection title={provider.label}>
         <PanelSectionRow>
           <DropdownItem
             label="Model"
-            rgOptions={Object.entries(CLAUDE_MODEL_LABELS).map(([data, label]) => ({ data, label }))}
-            selectedOption={settings.model}
-            onChange={(option) => change({ model: option.data })}
+            rgOptions={Object.entries(provider.models).map(([data, label]) => ({ data, label }))}
+            selectedOption={settings[provider.modelKey]}
+            onChange={(option) => change({ [provider.modelKey]: option.data })}
           />
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
             label="Full access"
-            description="Claude runs commands and changes settings without asking, so it can fix things, not just look. Off uses your Claude Code permission settings."
+            description={`${provider.short} runs commands and changes settings without asking, so it can fix things, not just look. ${provider.toolsOffHint}`}
             checked={settings.allow_tools}
             onChange={(value) => change({ allow_tools: value })}
           />
@@ -126,7 +138,7 @@ export function SettingsView({ app }: { app: AppState }) {
         <PanelSectionRow>
           <ToggleField
             label="Low priority"
-            description="Claude and speech run at lower CPU priority so games stay smooth."
+            description="The assistant and speech run at lower CPU priority so games stay smooth."
             checked={settings.low_priority}
             onChange={(value) => change({ low_priority: value })}
           />

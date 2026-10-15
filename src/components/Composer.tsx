@@ -13,6 +13,7 @@ import {
   voiceStop,
   voiceTap,
   SHORTCUT_LABELS,
+  agentName,
 } from "../api";
 import { getStore, patchStore, useStore } from "../store";
 import { theme } from "../theme";
@@ -36,7 +37,7 @@ export async function attachScreen() {
   }
   Navigation.OpenQuickAccessMenu(QuickAccessTab.Decky);
   patchStore({ busyAttaching: false });
-  if (error) toaster.toast({ title: "Claude", body: error });
+  if (error) toaster.toast({ title: "Screen", body: error });
 }
 
 let pressedAt = 0;
@@ -146,7 +147,7 @@ export function Composer({ app }: { app: AppState }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
       <TextField
-        {...({ placeholder: "Ask Claude…" } as object)}
+        {...({ placeholder: `Ask ${agentName(app)}…` } as object)}
         value={prompt}
         disabled={working}
         bShowClearAction={true}

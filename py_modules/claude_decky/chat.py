@@ -1,63 +1,35 @@
 import asyncio
+import contextlib
 import json
 import os
+import shutil
 import signal
 import time
 
 import decky
 
-from .env import CLAUDE, SETTINGS_DIR, child_env, lowered, runtime_path
+from .env import SETTINGS_DIR, child_env, lowered, runtime_path
 
 CHAT_FILE = os.path.join(SETTINGS_DIR, "chat.json")
 KEPT_MESSAGES = 200
 SENT_MESSAGES = 60
 STREAM_LIMIT = 16 * 1024 * 1024
 PARTIAL_INTERVAL = 0.25
-SYSTEM_PROMPT = (
-    "You are answering inside the small Steam Quick Access panel of a SteamOS handheld, "
-    "often while the owner is in a game. Keep replies short and plain: a few sentences "
-    "or a short list. No tables, no headings, no code blocks unless asked. "
-    "Questions may come from speech recognition, so read past small transcription mistakes. "
-    "An attached image is a screenshot of what is on the handheld's screen right now. "
-    "You have a shell on the device. Use it to find the cause of problems and to improve "
-    "performance: frame rate, stutter, temperatures, power limits, game and Proton settings, logs. "
-    "Check before changing anything, and say what you changed and how to undo it. "
-    "Never close or launch games."
-)
 WORKSPACE_NOTE = (
     "# Claude Decky workspace\n\n"
-    "Claude runs here from the Claude Decky plugin on a SteamOS handheld in game mode.\n"
+    "An AI assistant runs here from the Claude Decky plugin on a SteamOS handheld in game mode.\n"
     "The user asks from the Quick Access menu or by voice while playing, so keep answers short.\n"
 )
-TOOL_DETAIL_KEYS = ("description", "command", "file_path", "path", "pattern", "query", "url", "prompt")
-AUTH_ERRORS = ("invalid api key", "please run /login", "not logged in", "oauth token has expired",
-               "authentication_error", "api error: 401", "credit balance is too low", "invalid bearer token")
-
-
-def describe_tool(block):
-    name = block.get("name", "tool")
-    details = block.get("input") or {}
-    for key in TOOL_DETAIL_KEYS:
-        value = details.get(key)
-        if isinstance(value, str) and value.strip():
-            detail = " ".join(value.split())
-            if len(detail) > 70:
-                detail = detail[:67] + "..."
-            return f"{name}: {detail}"
-    return name
-
-
-def looks_like_auth_error(text):
-    lowered_text = (text or "").lower()
-    return any(marker in lowered_text for marker in AUTH_ERRORS)
+WORKSPACE_FILES = ("CLAUDE.md", "AGENTS.md", "GEMINI.md")
 
 
 class Chat:
-    def __init__(self, events, settings):
+    def __init__(self, events, settings, providers):
         self.events = events
         self.settings = settings
+        self.providers = providers
         self.messages = []
-        self.session_id = None
+        self.sessions = {}
         self.status = "idle"
         self.error = ""
         self.auth_needed = False
@@ -71,22 +43,40 @@ class Chat:
         self.partial_handle = None
         self.partial_sent_at = 0.0
         self.on_reply = None
+        self.running = None
+
+    @property
+    def provider(self):
+        return self.providers[self.settings["provider"]]
+
+    @property
+    def session_id(self):
+        return self.sessions.get(self.settings["provider"])
+
+    @session_id.setter
+    def session_id(self, value):
+        if value:
+            self.sessions[self.settings["provider"]] = value
+        else:
+            self.sessions.pop(self.settings["provider"], None)
 
     def load(self):
         try:
             with open(CHAT_FILE) as handle:
                 saved = json.load(handle)
             self.messages = saved.get("messages", [])[-KEPT_MESSAGES:]
-            self.session_id = saved.get("session_id")
+            self.sessions = dict(saved.get("sessions") or {})
+            if saved.get("session_id") and "claude" not in self.sessions:
+                self.sessions["claude"] = saved["session_id"]
         except (OSError, ValueError):
             self.messages = []
-            self.session_id = None
+            self.sessions = {}
 
     def save(self):
         os.makedirs(os.path.dirname(CHAT_FILE), exist_ok=True)
         temporary = CHAT_FILE + ".tmp"
         with open(temporary, "w") as handle:
-            json.dump({"session_id": self.session_id, "messages": self.messages}, handle)
+            json.dump({"sessions": self.sessions, "messages": self.messages}, handle)
         os.replace(temporary, CHAT_FILE)
 
     def add(self, role, text, **extra):
@@ -117,40 +107,19 @@ class Chat:
         configured = os.path.expanduser(self.settings["workdir"]) if self.settings["workdir"] else ""
         if configured and os.path.isdir(configured):
             return configured
-        folder = runtime_path("workspace", "CLAUDE.md")
-        if not os.path.exists(folder):
-            with open(folder, "w") as handle:
-                handle.write(WORKSPACE_NOTE)
-        return os.path.dirname(folder)
+        folder = os.path.dirname(runtime_path("workspace", WORKSPACE_FILES[0]))
+        for name in WORKSPACE_FILES:
+            path = os.path.join(folder, name)
+            if not os.path.exists(path):
+                with open(path, "w") as handle:
+                    handle.write(WORKSPACE_NOTE)
+        return folder
+
+    def run_spec(self, prompt, shot):
+        return self.provider.run_spec(prompt, shot, self.session_id, self.settings, self.workdir())
 
     def command(self):
-        args = [
-            CLAUDE,
-            "-p",
-            "--input-format", "stream-json",
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--append-system-prompt", SYSTEM_PROMPT,
-        ]
-        if self.settings["model"]:
-            args += ["--model", self.settings["model"]]
-        if self.settings["allow_tools"]:
-            args += ["--permission-mode", "bypassPermissions"]
-        if self.session_id:
-            args += ["--resume", self.session_id]
-        return lowered(args, self.settings["low_priority"])
-
-    def payload(self, prompt, shot):
-        content = []
-        if shot:
-            content.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": shot.media_type, "data": shot.encoded()},
-            })
-        content.append({"type": "text", "text": prompt})
-        message = {"type": "user", "message": {"role": "user", "content": content}}
-        return (json.dumps(message) + "\n").encode()
+        return lowered(self.run_spec("", None).args, self.settings["low_priority"])
 
     def attach(self, shot):
         self.attachment = shot
@@ -162,15 +131,16 @@ class Chat:
 
     async def send(self, prompt, via="text", shot=None):
         prompt = (prompt or "").strip()
+        provider = self.provider
         if not prompt:
             return {"ok": False, "error": "Type or say a question first"}
         if self.status == "working":
-            return {"ok": False, "error": "Claude is still working on the last one"}
-        if not os.access(CLAUDE, os.X_OK):
-            return {"ok": False, "error": "Claude Code is not installed yet"}
+            return {"ok": False, "error": f"{self.running.short if self.running else provider.short} is still working on the last one"}
+        if not provider.installed():
+            return {"ok": False, "error": f"{provider.label} is not installed yet"}
         shot = shot or self.attachment
         self.attachment = None
-        extra = {}
+        extra = {"agent": provider.id}
         if via != "text":
             extra["via"] = via
         if shot:
@@ -182,17 +152,19 @@ class Chat:
         self.started = time.time()
         self.cancelled = False
         self.replied = False
+        self.running = provider
         self.add("user", prompt, **extra)
-        self.task = asyncio.get_running_loop().create_task(self.run(self.payload(prompt, shot)))
+        spec = provider.run_spec(prompt, shot, self.session_id, self.settings, self.workdir())
+        self.task = asyncio.get_running_loop().create_task(self.run(provider, spec))
         return {"ok": True}
 
-    async def run(self, payload):
+    async def run(self, provider, spec):
         try:
             self.process = await asyncio.create_subprocess_exec(
-                *self.command(),
+                *lowered(spec.args, self.settings["low_priority"]),
                 cwd=self.workdir(),
-                env=child_env({"DISABLE_AUTOUPDATER": "1"}),
-                stdin=asyncio.subprocess.PIPE,
+                env=child_env(spec.env),
+                stdin=asyncio.subprocess.PIPE if spec.stdin else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=STREAM_LIMIT,
@@ -200,47 +172,69 @@ class Chat:
             )
             if self.cancelled:
                 self.kill()
-            try:
-                self.process.stdin.write(payload)
-                await self.process.stdin.drain()
-                self.process.stdin.close()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            if spec.stdin:
+                try:
+                    self.process.stdin.write(spec.stdin)
+                    await self.process.stdin.drain()
+                    self.process.stdin.close()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
             stderr = asyncio.get_running_loop().create_task(self.process.stderr.read())
             async for line in self.process.stdout:
-                self.handle_line(line)
+                self.handle_line(provider, line)
             code = await self.process.wait()
-            await self.finish(code, (await stderr).decode(errors="replace").strip())
+            await self.finish(provider, code, (await stderr).decode(errors="replace").strip())
         except Exception as error:
-            decky.logger.exception("claude run failed")
-            self.fail(str(error) or type(error).__name__)
+            decky.logger.exception("%s run failed", provider.id)
+            self.fail(provider, str(error) or type(error).__name__)
         finally:
             self.process = None
+            self.running = None
             self.clear_partial()
+            for path in spec.cleanup:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    with contextlib.suppress(OSError):
+                        os.unlink(path)
 
-    def handle_line(self, line):
+    def handle_line(self, provider, line):
         try:
             event = json.loads(line)
         except ValueError:
             return
-        kind = event.get("type")
-        if kind == "system" and event.get("session_id"):
-            self.session_id = event["session_id"]
-        elif kind == "stream_event":
-            self.handle_stream(event.get("event") or {})
-        elif kind == "assistant":
-            self.handle_assistant(event.get("message") or {})
-        elif kind == "result":
-            self.handle_result(event)
+        if not isinstance(event, dict):
+            return
+        for step in provider.parse(event):
+            self.apply(provider, step)
 
-    def handle_stream(self, event):
-        if event.get("type") == "message_start":
-            self.partial = ""
-        elif event.get("type") == "content_block_delta":
-            delta = event.get("delta") or {}
-            if delta.get("type") == "text_delta":
-                self.partial += delta.get("text", "")
-                self.schedule_partial()
+    def apply(self, provider, step):
+        if step.kind == "session":
+            if step.text:
+                self.sessions[provider.id] = step.text
+        elif step.kind == "partial_reset":
+            self.clear_partial()
+        elif step.kind == "delta":
+            self.partial += step.text
+            self.schedule_partial()
+        elif step.kind == "text":
+            self.clear_partial()
+            self.replied = True
+            self.add("assistant", step.text, agent=provider.id)
+        elif step.kind == "flush":
+            text = self.partial.strip()
+            self.clear_partial()
+            if text:
+                self.replied = True
+                self.add("assistant", text, agent=provider.id)
+        elif step.kind == "tool":
+            self.add("tool", step.text, agent=provider.id)
+        elif step.kind == "final":
+            if not self.replied:
+                self.replied = True
+                self.add("assistant", step.text, agent=provider.id)
+        elif step.kind == "error":
+            self.error = step.text
 
     def schedule_partial(self):
         if not self.events.visible or self.partial_handle is not None:
@@ -260,35 +254,16 @@ class Chat:
             self.partial_handle = None
         self.partial = ""
 
-    def handle_assistant(self, message):
-        self.clear_partial()
-        for block in message.get("content") or []:
-            if block.get("type") == "text" and block.get("text", "").strip():
-                self.replied = True
-                self.add("assistant", block["text"].strip())
-            elif block.get("type") == "tool_use":
-                self.add("tool", describe_tool(block))
-
-    def handle_result(self, event):
-        if event.get("session_id"):
-            self.session_id = event["session_id"]
-        text = (event.get("result") or "").strip()
-        if event.get("is_error"):
-            self.error = text or event.get("subtype", "error")
-        elif text and not self.replied:
-            self.replied = True
-            self.add("assistant", text)
-
-    async def finish(self, code, stderr):
+    async def finish(self, provider, code, stderr):
         if self.cancelled:
             self.status = "idle"
             self.add("error", "Stopped")
             return
-        if "No conversation found" in stderr:
-            self.session_id = None
+        if provider.stale_session(stderr):
+            self.sessions.pop(provider.id, None)
         if code != 0 or self.error:
             last_line = stderr.splitlines()[-1] if stderr else ""
-            self.fail(self.error or last_line or f"claude exited with code {code}")
+            self.fail(provider, self.error or last_line or f"{provider.executable} exited with code {code}")
             return
         self.status = "idle"
         self.save()
@@ -296,10 +271,10 @@ class Chat:
         if self.on_reply:
             self.on_reply(self.last_reply())
 
-    def fail(self, message):
+    def fail(self, provider, message):
         self.status = "error"
         self.error = message
-        self.auth_needed = looks_like_auth_error(message)
+        self.auth_needed = provider.looks_like_auth_error(message)
         self.add("error", message)
 
     def last_reply(self):
@@ -326,7 +301,7 @@ class Chat:
         if self.cancel() and self.task:
             await asyncio.wait([self.task], timeout=5)
         self.messages = []
-        self.session_id = None
+        self.sessions = {}
         self.status = "idle"
         self.error = ""
         self.auth_needed = False
