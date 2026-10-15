@@ -117,8 +117,8 @@ export function SettingsView({ app }: { app: AppState }) {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
-            label="Run commands without asking"
-            description="Lets Claude run shell commands to check the system. Your Claude Code settings apply when off."
+            label="Full access"
+            description="Claude runs commands and changes settings without asking, so it can fix things, not just look. Off uses your Claude Code permission settings."
             checked={settings.allow_tools}
             onChange={(value) => change({ allow_tools: value })}
           />

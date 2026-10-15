@@ -1,38 +1,29 @@
+<p align="center"><img src="assets/logo.png" width="128" alt=""></p>
+
 # Claude Decky
 
-A Decky Loader plugin that puts Claude Code in the Steam Quick Access menu, with sign-in, push-to-talk and screen sharing.
+Claude Code in the Steam Quick Access menu. Ask why a game stutters, how to get more FPS, or to fix a broken setting, without leaving game mode.
 
-- **Chat**: runs `claude -p` with stream-json as the `deck` user and resumes the session. Replies render as light markdown.
-- **Sign in**: runs `claude auth login` in a pty. The panel shows a QR code for a one-time page on the handheld's LAN address, so the code can be pasted from a phone. You can also scan the direct link and type the code. Sign out removes stored tokens and keeps a backup.
-- **Voice**: hold the in-game shortcut (default L3 + R3), talk, release. Tap it once for hands-free, which stops when you pause. In the panel, hold X or the Talk button. Recording uses `pw-record`. Speech to text runs on the device with a bundled `whisper.cpp` (`bin/whisper-cli`), and models download from Settings.
-- **Screen**: the shortcut, or the Screen button, captures the game-mode screen with `gamescopectl` and sends it with the question.
-- **Idle cost**: no timers or polling. The shortcut listener sleeps on evdev with a kernel event mask, so only the chord buttons wake it. Events go to the panel only while it is open.
+## Install
 
-Layout: `src/` frontend, `main.py` + `py_modules/claude_decky/` backend, `harness/` headless tests, `tools/` measurement and CDP helpers, `scripts/` build and install.
+1. Install [Decky Loader](https://decky.xyz).
+2. Download `claude-decky-*.zip` from [Releases](../../releases).
+3. Decky → Settings → General → turn on **Developer mode**.
+4. Decky → Settings → Developer → **Install plugin from ZIP**.
+
+## Use
+
+- Open the menu (**…**) → Claude. It sets up Claude Code and signs you in with a QR code.
+- **Talk:** get a voice model in Settings once. Then hold **L3 + R3** in game, speak, let go. It sends a screenshot too.
+- **Type:** in the panel. Hold **X** to talk there.
+- Settings: model, shortcut, voice model, full access.
+
+> Full access is on: Claude can run any command on your device without asking. Turn it off in Settings if you don't want that.
 
 ## Build
 
 ```
-pnpm install
-pnpm run build
+pnpm install && pnpm build
 scripts/build-whisper.sh
+scripts/release.sh
 ```
-
-`build-whisper.sh` builds a static x86-64 `whisper-cli` in Docker.
-
-## Install
-
-```
-scripts/install.sh <ssh-host>
-```
-
-This builds, copies to `~/homebrew/plugins/claude-decky` with the ownership Decky expects, and restarts `plugin_loader`. Pass a git ref to install another version, for example `scripts/install.sh <ssh-host> 65cd4d5` for v0.1.0.
-
-## Test
-
-```
-rsync -a --exclude node_modules --exclude .git ./ <ssh-host>:/tmp/cdtools/plugin/
-ssh <ssh-host> 'cd /tmp/cdtools/plugin && python3 harness/test_backend.py fake'
-```
-
-`live` mode uses the real CLI, microphone, screen and a virtual uinput pad.

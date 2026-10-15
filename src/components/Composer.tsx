@@ -101,6 +101,8 @@ function StatusLine({ app }: { app: AppState }) {
     text = voice.error;
   } else if (voice.ready && app.settings.shortcut !== "off") {
     text = `Ready · hold ${SHORTCUT_LABELS[app.settings.shortcut]} in game to talk`;
+  } else if (!voice.ready) {
+    text = "To talk, get a voice model in Settings";
   }
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color, minHeight: "18px" }}>

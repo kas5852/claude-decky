@@ -11,7 +11,8 @@ import {
 } from "@decky/ui";
 import { addEventListener, definePlugin, removeEventListener, toaster, useQuickAccessVisible } from "@decky/api";
 import { useEffect } from "react";
-import { RiAddLine, RiChat3Line, RiSettings3Line, RiSparkling2Fill } from "react-icons/ri";
+import { RiAddLine, RiChat3Line, RiSettings3Line } from "react-icons/ri";
+import { PluginIcon } from "./icon";
 import { AppState, AuthState, ChatState, Notice, VoiceState, getState, newChat, setVisible } from "./api";
 import { Composer, isTalkButton, talkDown, talkUp } from "./components/Composer";
 import { Conversation } from "./components/Conversation";
@@ -19,7 +20,7 @@ import { SettingsView } from "./components/SettingsView";
 import { getStore, patchStore, setApp, setAuth, setChat, setPartial, setVoice, useStore } from "./store";
 import { theme } from "./theme";
 
-const icon = <RiSparkling2Fill />;
+const icon = <PluginIcon />;
 let lastVoicePhase = "idle";
 
 function openPanel() {
@@ -173,7 +174,7 @@ export default definePlugin(() => {
     name: "Claude",
     titleView: <TitleView />,
     content: <Content />,
-    icon: <RiSparkling2Fill />,
+    icon: <PluginIcon />,
     onDismount() {
       listeners.forEach(([name, listener]) => removeEventListener(name, listener));
     },

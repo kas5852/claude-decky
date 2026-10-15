@@ -13,7 +13,7 @@ DEFAULTS = {
     "voice_model": "base.en",
     "shortcut": "l3_r3",
     "shortcut_screen": True,
-    "allow_tools": False,
+    "allow_tools": True,
     "low_priority": True,
 }
 CHOICES = {

@@ -1,7 +1,7 @@
 {
   "name": "claude-decky",
-  "version": "0.2.0",
-  "description": "Ask Claude Code about this device from the Quick Access menu.",
+  "version": "0.3.0",
+  "description": "Claude Code in the Quick Access menu. Ask by voice, share the screen, debug and tune your handheld.",
   "type": "module",
   "scripts": {
     "build": "rollup -c",
